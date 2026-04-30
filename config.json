@@ -1,0 +1,24 @@
+{
+  "initial_balance": 1000.0,
+  "max_positions": 5,
+  "default_stake": 10.0,
+  "max_stake_pct": 0.05,
+  "min_odds": 1.1,
+  "max_odds": 10.0,
+  "min_edge": 2.0,
+  "min_confidence": 0.6,
+  "strategy_weights": {
+    "value": 0.5,
+    "momentum": 0.3,
+    "arbitrage": 0.2
+  },
+  "tracked_sports": [
+    "soccer",
+    "horse_racing",
+    "tennis",
+    "basketball",
+    "american_football"
+  ],
+  "auto_settle_enabled": true,
+  "settlement_check_hours": 24
+}

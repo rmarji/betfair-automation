@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  betfair-trader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILD_DATE=${BUILD_DATE:-}
+    container_name: betfair-trader
+    image: betfair-automation:latest
+
+    # Restart policy
+    restart: unless-stopped
+    restart_grace_period: 30s
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+    # Environment variables
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - BETFAIR_USERNAME=${BETFAIR_USERNAME:-}
+      - BETFAIR_PASSWORD=${BETFAIR_PASSWORD:-}
+      - BETFAIR_APP_KEY=${BETFAIR_APP_KEY:-}
+      - BETFAIR_CERTS_PATH=/app/certs
+
+    # Healthcheck override (if built-in one isn't sufficient)
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import betfair_cli, signal_engine, paper_trader; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    # Volumes for persistence
+    volumes:
+      - ./data:/app/data
+      - ./certs:/app/certs:ro
+      - ./config.json:/app/config.json:ro
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service"
+        compress: "true"
+
+    # Network configuration
+    networks:
+      - betfair-net
+
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+
+    # Read-only root filesystem (optional, enable if certs/config mounted)
+    # read_only: true
+    # tmpfs:
+    #   - /tmp:size=16m
+
+    # Command: run trading cycle by default
+    command: ["python3", "betfair_cli.py", "run"]
+
+networks:
+  betfair-net:
+    driver: bridge
+    name: betfair-automation-network
