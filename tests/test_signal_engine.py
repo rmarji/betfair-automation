@@ -1,134 +1,118 @@
-#!/usr/bin/env python3
-"""
-Unit tests for Betfair Signal Engine
-
-Tests signal generation, edge calculation, and strategy logic.
-Run with: python3 -m unittest tests.test_signal_engine
-"""
-
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import unittest
-from datetime import datetime
-from signal_engine import SignalEngine, Signal, BetType, SignalStrength
-
+from datetime import datetime, timedelta
+from signal_engine import SignalEngine, SignalStrength, BetType
 
 class TestSignalEngine(unittest.TestCase):
-    """Test cases for signal generation functionality."""
-
     def setUp(self):
-        """Create a fresh signal engine for each test."""
         self.engine = SignalEngine()
 
-    def test_engine_has_three_strategies(self):
-        """Engine has 3 strategies."""
-        self.assertEqual(len(self.engine.strategies), 3)
-
-    def test_minimum_confidence_threshold(self):
-        """Minimum confidence is 0.6."""
-        self.assertEqual(self.engine.MIN_CONFIDENCE, 0.6)
-
-    def test_edge_thresholds_correct(self):
-        """Edge thresholds are correctly defined."""
-        thresholds = self.engine.EDGE_THRESHOLDS
-        self.assertEqual(thresholds[SignalStrength.WEAK], 0.01)
-        self.assertEqual(thresholds[SignalStrength.MODERATE], 0.02)
-        self.assertEqual(thresholds[SignalStrength.STRONG], 0.05)
-        self.assertEqual(thresholds[SignalStrength.ELITE], 0.10)
-
-    def test_empty_markets_returns_empty_signals(self):
-        """Empty markets → empty signals."""
-        signals = self.engine.generate_signals([])
-        self.assertEqual(signals, [])
-
-    def test_signal_to_dict(self):
-        """Signal.to_dict() works correctly."""
-        signal = Signal(
-            market_id="1.234567890",
-            selection_id=12345,
-            event_name="Team A vs Team B",
-            selection_name="Team A",
-            bet_type=BetType.BACK,
-            odds=2.50,
-            edge_pct=7.3,
-            strength=SignalStrength.STRONG,
-            strategy="value_betting",
-            confidence=0.85,
-            reason="5% edge detected"
-        )
-        d = signal.to_dict()
+    def test_value_betting(self):
+        """Test that value betting identifies a bet when odds > fair odds."""
+        market = {
+            "marketId": "M1",
+            "eventName": "Test Value Event",
+            "runners": [
+                {
+                    "selectionId": 101,
+                    "runnerName": "Team A",
+                    "ex": {"availableToBack": [{"price": 2.20, "size": 100}]}
+                }
+            ],
+            "fair_odds": {101: 2.00} # 10% edge
+        }
         
-        self.assertEqual(d["market_id"], "1.234567890")
-        self.assertEqual(d["selection_id"], 12345)
-        self.assertEqual(d["bet_type"], "BACK")
-        self.assertEqual(d["strength"], "STRONG")
-        self.assertEqual(d["confidence"], 0.85)
-        self.assertIsNone(d["expires_at"])
+        signals = self.engine.generate_signals([market])
+        self.assertTrue(len(signals) > 0)
+        self.assertEqual(signals[0].strategy, "value")
+        self.assertEqual(signals[0].edge_pct, 0.10)
+        self.assertEqual(signals[0].strength, SignalStrength.STRONG)
 
-    def test_signal_with_expiry_serializes(self):
-        """Signal with expiry serializes correctly."""
-        expires = datetime(2026, 3, 4, 15, 0, 0)
-        signal = Signal(
-            market_id="1.234567890",
-            selection_id=12345,
-            event_name="Test Event",
-            selection_name="Selection A",
-            bet_type=BetType.LAY,
-            odds=1.80,
-            edge_pct=3.2,
-            strength=SignalStrength.MODERATE,
-            strategy="steam_move",
-            confidence=0.72,
-            reason="Sharp movement",
-            expires_at=expires
-        )
-        d = signal.to_dict()
+    def test_steam_move(self):
+        """Test that steam move detects significant price drops."""
+        now = datetime.utcnow()
+        market = {
+            "marketId": "M2",
+            "eventName": "Test Steam Event",
+            "runners": [
+                {
+                    "selectionId": 201,
+                    "runnerName": "Team B",
+                    "ex": {"availableToBack": [{"price": 1.80, "size": 100}]}
+                }
+            ],
+            "odds_history": {
+                201: [
+                    {"price": 2.10, "timestamp": (now - timedelta(minutes=30)).isoformat()},
+                    {"price": 1.80, "timestamp": now.isoformat()}
+                ]
+            }
+        }
         
-        self.assertIn("2026-03-04", d["expires_at"])
+        signals = self.engine.generate_signals([market])
+        self.assertTrue(len(signals) > 0)
+        self.assertEqual(signals[0].strategy, "steam")
+        # (2.10 - 1.80) / 2.10 = ~14% move
+        self.assertGreater(signals[0].edge_pct, 0)
 
-    def test_bet_type_enum_values(self):
-        """BetType enum has correct values."""
-        self.assertEqual(BetType.BACK.value, "BACK")
-        self.assertEqual(BetType.LAY.value, "LAY")
+    def test_pickwatch_integration(self):
+        """Test that Pickwatch data generates signals."""
+        market = {
+            "marketId": "M3",
+            "eventName": "Test Pickwatch Event",
+            "runners": [
+                {
+                    "selectionId": 301,
+                    "runnerName": "Team C",
+                    "ex": {"availableToBack": [{"price": 2.00, "size": 100}]}
+                }
+            ],
+            "pickwatch_data": {
+                "Team C": {"edge": 0.08, "expert_pct": 0.75}
+            }
+        }
+        
+        signals = self.engine.generate_signals([market])
+        self.assertTrue(len(signals) > 0)
+        self.assertEqual(signals[0].strategy, "pickwatch")
+        self.assertEqual(signals[0].edge_pct, 0.08)
+        self.assertEqual(signals[0].strength, SignalStrength.STRONG)
 
-    def test_signal_strength_ordering(self):
-        """SignalStrength enum has correct ordering."""
-        self.assertLess(SignalStrength.WEAK.value, SignalStrength.MODERATE.value)
-        self.assertLess(SignalStrength.MODERATE.value, SignalStrength.STRONG.value)
-        self.assertLess(SignalStrength.STRONG.value, SignalStrength.ELITE.value)
+    def test_confidence_filtering(self):
+        """Test that signals below MIN_CONFIDENCE are filtered out."""
+        market = {
+            "marketId": "M4",
+            "eventName": "Low Confidence Event",
+            "runners": [
+                {
+                    "selectionId": 401,
+                    "runnerName": "Team D",
+                    "ex": {"availableToBack": [{"price": 2.00, "size": 100}]}
+                }
+            ],
+            "pickwatch_data": {
+                "Team D": {"edge": 0.01, "expert_pct": 0.40} # Below MIN_CONFIDENCE (0.6)
+            }
+        }
+        
+        signals = self.engine.generate_signals([market])
+        self.assertEqual(len(signals), 0)
 
-
-class TestEdgeCalculation(unittest.TestCase):
-    """Test cases for edge calculation logic."""
-
-    def test_positive_edge(self):
-        """Positive edge calculation (profitable bet)."""
-        # If true probability is 50% and odds are 2.50
-        # Edge = (0.50 * 2.50) - 1 = 0.25 = 25%
-        true_prob = 0.50
-        odds = 2.50
-        edge = (true_prob * odds) - 1
-        self.assertEqual(edge, 0.25)
-
-    def test_negative_edge(self):
-        """Negative edge calculation (unprofitable bet)."""
-        # True prob 50%, odds 1.80 (implied 55.6%)
-        # Edge = (0.50 * 1.80) - 1 = -0.10 = -10%
-        true_prob = 0.50
-        odds = 1.80
-        edge = (true_prob * odds) - 1
-        self.assertAlmostEqual(edge, -0.10, places=2)
-
-    def test_breakeven_edge(self):
-        """Break-even edge calculation."""
-        # True prob 40%, fair odds = 2.50
-        true_prob = 0.40
-        odds = 2.50
-        edge = (true_prob * odds) - 1
-        self.assertAlmostEqual(edge, 0.0, places=2)
-
+    def test_signal_sorting(self):
+        """Test that signals are sorted by edge percentage (highest first)."""
+        market_low = {
+            "marketId": "ML",
+            "runners": [{"selectionId": 1, "runnerName": "A", "ex": {"availableToBack": [{"price": 2.0, "size": 1}]}}],
+            "fair_odds": {1: 1.95} # ~2.5% edge
+        }
+        market_high = {
+            "marketId": "MH",
+            "runners": [{"selectionId": 2, "runnerName": "B", "ex": {"availableToBack": [{"price": 3.0, "size": 1}]}}],
+            "fair_odds": {2: 2.00} # 50% edge
+        }
+        
+        signals = self.engine.generate_signals([market_low, market_high])
+        self.assertEqual(signals[0].market_id, "MH")
+        self.assertEqual(signals[1].market_id, "ML")
 
 if __name__ == "__main__":
     unittest.main()

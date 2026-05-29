@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
@@ -63,23 +64,121 @@ def cmd_status(args):
 
 
 def cmd_run(args):
-    """Execute trading cycle."""
+    """Execute trading cycle — Pickwatch-driven paper trades."""
+    from pickwatch_adapter import (
+        get_todays_picks, get_unresolved_picks,
+        pickwatch_picks_to_market_data, compute_pickwatch_stats
+    )
+    from paper_trader import place_bet, MAX_POSITIONS
+    from config import Config
+
     conn = init_db()
     balance = get_balance(conn)
     positions = get_open_positions(conn)
     position_count = len(positions)
     
     print("🤖 **TRADING CYCLE**")
-    print("━" * 24)
+    print("━" * 28)
     print(f"💰 Balance:     £{balance:,.2f}")
-    print(f"📊 Positions:   {position_count}/5")
+    print(f"📊 Positions:   {position_count}/{MAX_POSITIONS}")
     
-    # Check signals (would need live data)
-    engine = SignalEngine()
+    cfg = Config()
     
-    # Note: Without Betfair credentials, we can't fetch live markets
-    print("\n⚠️  No live market data (credentials required)")
-    print("   Connect Betfair API to enable trading")
+    # ── Source 1: Pickwatch data (local DB, always available) ──
+    picks = get_todays_picks()
+    print(f"\n📋 Pickwatch Picks Today: {len(picks)}")
+    
+    placed = 0
+    skipped = 0
+    
+    if picks:
+        markets = pickwatch_picks_to_market_data(picks)
+        engine = SignalEngine()
+        signals = engine.generate_signals(markets)
+        
+        print(f"📡 Signals Generated: {len(signals)}")
+        
+        for sig in signals[:5]:  # Max 5 signals per cycle
+            print(f"\n  {sig.strength.name} {sig.event_name}")
+            print(f"    {sig.bet_type.value} {sig.selection_name} @ {sig.odds:.2f}")
+            print(f"    Edge: {sig.edge_pct*100:.1f}% | Conf: {sig.confidence*100:.0f}%")
+            print(f"    {sig.reason}")
+            
+            # Check position limit
+            if position_count >= MAX_POSITIONS:
+                print(f"    ⛔ Max positions reached ({MAX_POSITIONS})")
+                skipped += 1
+                continue
+            
+            # Check duplicate market
+            existing_markets = {p["market_id"] for p in positions}
+            if sig.market_id in existing_markets:
+                print(f"    ⏭️  Already have position in this market")
+                skipped += 1
+                continue
+            
+            # Kelly Criterion stake sizing
+            b = sig.odds - 1  # net odds
+            p = sig.confidence
+            q = 1 - p
+            kelly_frac = (b * p - q) / b if b > 0 else 0
+            kelly_frac = max(0, min(kelly_frac, cfg.max_stake_pct))
+            stake = round(balance * kelly_frac, 2)
+            
+            # Minimum stake
+            if stake < 1.0:
+                stake = min(cfg.default_stake, balance * cfg.max_stake_pct)
+            stake = round(max(stake, 1.0), 2)
+            
+            pid = place_bet(
+                conn,
+                market_id=sig.market_id,
+                selection_id=sig.selection_id,
+                event_name=sig.event_name,
+                selection_name=sig.selection_name,
+                bet_type=sig.bet_type.value,
+                odds=sig.odds,
+                stake=stake,
+            )
+            if pid:
+                placed += 1
+                position_count += 1
+                balance -= stake  # Track locally for next stake calc
+    
+    # ── Source 2: Betfair live (if credentials available) ──
+    try:
+        from betfair_client import BetfairClient
+        app_key = os.environ.get("BETFAIR_APP_KEY")
+        if app_key:
+            client = BetfairClient.from_config(cfg.to_dict())
+            all_signals = []
+            for sport_id in [7524, 7522, 6423]:
+                markets = client.list_markets(sport_id=sport_id, max_results=10)
+                for m in markets:
+                    m["fair_odds"] = {r["selection_id"]: r["odds"] * 0.95 for r in m["runners"]}
+                signals = engine.generate_signals(markets)
+                all_signals.extend(signals)
+            if all_signals:
+                print(f"\n📡 Betfair Live: {len(all_signals)} additional signals")
+            client.logout()
+    except Exception:
+        pass  # No Betfair creds — Pickwatch-only mode
+    
+    # ── Summary ──
+    if not picks:
+        print("\n📭 No Pickwatch picks today — no trades placed")
+        print("   Picks sync from Pickwatch dashboard daily")
+    
+    print(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(f"✅ Placed: {placed}  ⏭️  Skipped: {skipped}")
+    
+    # Show open positions
+    positions = get_open_positions(conn)
+    if positions:
+        print(f"\n📊 Open Positions ({len(positions)}):")
+        for pos in positions:
+            emoji = "📈" if pos["bet_type"] == "BACK" else "📉"
+            print(f"  {emoji} {pos['selection_name']} {pos['bet_type']} @ {pos['odds']:.2f} £{pos['stake']:.2f}")
     
     print(f"\n⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
     conn.close()
@@ -291,7 +390,16 @@ def cmd_health(args):
     except Exception as e:
         checks.append(("Paper Trader", False, str(e)))
     
-    # Check API credentials
+    # Check Pickwatch data
+    try:
+        from pickwatch_adapter import get_todays_picks, PICKWATCH_DB
+        if PICKWATCH_DB.exists():
+            picks = get_todays_picks()
+            checks.append(("Pickwatch Data", True, f"{len(picks)} picks today"))
+        else:
+            checks.append(("Pickwatch Data", False, "DB not found"))
+    except Exception as e:
+        checks.append(("Pickwatch Data", False, str(e)))
     cert_path = Path(__file__).parent / "config" / "betfair.crt"
     key_path = Path(__file__).parent / "config" / "betfair.key"
     if cert_path.exists() and key_path.exists():
@@ -307,6 +415,58 @@ def cmd_health(args):
     healthy = sum(1 for _, ok, _ in checks if ok)
     total = len(checks)
     print(f"\n✅ {healthy}/{total} systems healthy")
+    print(f"\n⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
+
+
+def cmd_picks(args):
+    """Show Pickwatch picks for today with signal analysis."""
+    from pickwatch_adapter import (
+        get_todays_picks, get_unresolved_picks,
+        pickwatch_picks_to_market_data, compute_pickwatch_stats,
+        american_to_decimal
+    )
+    
+    print("🎯 **PICKWATCH PICKS**")
+    print("━" * 28)
+    
+    picks = get_todays_picks()
+    if not picks:
+        print("\n📭 No picks for today")
+        print("   Picks sync from Pickwatch dashboard")
+    else:
+        print(f"\n📋 Today: {len(picks)} picks\n")
+        for p in picks:
+            odds_str = f"{p['odds_american']:+d}" if p['odds_american'] else "PK"
+            rec_emoji = "🔥" if p["recommendation"] == "STRONG BET" else "✅" if p["recommendation"] == "BET" else "📊"
+            dec = p.get("odds_decimal", 2.0)
+            print(f"  {rec_emoji} {p['sport']:4} {p['matchup']:25}")
+            print(f"      {p['pick_team']:15} {odds_str:>6} ({dec:.2f})")
+            print(f"      Edge: {p['edge']:.1f}%  Conf: {p['confidence_score']:.0f}%  Rating: {p.get('value_rating', '-')}")
+        
+        # Signal analysis
+        markets = pickwatch_picks_to_market_data(picks)
+        if markets:
+            from signal_engine import SignalEngine
+            engine = SignalEngine()
+            signals = engine.generate_signals(markets)
+            print(f"\n📡 Signal Analysis: {len(signals)} tradeable signals")
+            for sig in signals:
+                strength_emoji = {"WEAK": "⚪", "MODERATE": "🟡", "STRONG": "🟠", "ELITE": "🔴"}.get(sig.strength.name, "?")
+                print(f"  {strength_emoji} {sig.selection_name} @ {sig.odds:.2f}")
+                print(f"     Edge: {sig.edge_pct*100:.1f}% Conf: {sig.confidence*100:.0f}% {sig.reason}")
+    
+    # Stats
+    stats = compute_pickwatch_stats()
+    if stats:
+        print(f"\n📊 Historical: {stats['wins']}W-{stats['losses']}L-{stats['pushes']}P ({stats['win_rate']}%)")
+        for sport, s in stats["by_sport"].items():
+            print(f"   {sport}: {s['wins']}W-{s['losses']}L ({s['win_rate']}%)")
+    
+    # Unresolved
+    unresolved = get_unresolved_picks()
+    if unresolved:
+        print(f"\n⏳ Unresolved: {len(unresolved)} picks pending")
+    
     print(f"\n⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
 
 
@@ -414,10 +574,11 @@ def main():
         epilog="""
 Commands:
   status    Portfolio status
-  run       Execute trading cycle
+  run       Execute trading cycle (Pickwatch-driven)
   history   Trade history
   signals   Current signals
   markets   Available markets
+  picks     Show Pickwatch picks for today
   stats     Trading statistics
   config    View/modify configuration
   health    System health check
@@ -466,6 +627,10 @@ Commands:
     health_parser = subparsers.add_parser("health", help="System health check")
     health_parser.set_defaults(func=cmd_health)
     
+    # Picks
+    picks_parser = subparsers.add_parser("picks", help="Show Pickwatch picks for today")
+    picks_parser.set_defaults(func=cmd_picks)
+
     # Reset
     reset_parser = subparsers.add_parser("reset", help="Reset portfolio")
     reset_parser.add_argument("--confirm", action="store_true", help="Confirm reset")

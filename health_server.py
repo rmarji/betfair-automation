@@ -269,18 +269,72 @@ def trading_scheduler():
             print(f"[{now}] 🔍 Starting trading cycle...")
 
             conn = paper_trader.init_db()
+            balance = paper_trader.get_balance(conn)
+            open_pos = paper_trader.get_open_positions(conn)
 
-            # 1. Check credentials — run live cycle if available
+            # ── Pickwatch-driven paper trading ──
             app_key = os.getenv("BETFAIR_APP_KEY")
+            placed = 0
+
+            try:
+                from pickwatch_adapter import (
+                    get_todays_picks, pickwatch_picks_to_market_data
+                )
+                picks = get_todays_picks()
+                
+                if picks:
+                    # Convert Pickwatch picks to market format
+                    markets = pickwatch_picks_to_market_data(picks)
+                    engine = SignalEngine()
+                    signals = engine.generate_signals(markets)
+                    
+                    print(f"[{now}] 📡 Found {len(signals)} signals from {len(picks)} Pickwatch picks")
+                    
+                    existing_markets = {p["market_id"] for p in open_pos}
+                    
+                    for sig in signals:
+                        if len(open_pos) + placed >= cfg.max_positions:
+                            print(f"[{now}] ⛔ Max positions ({cfg.max_positions}) reached")
+                            break
+                        if sig.market_id in existing_markets:
+                            continue  # Skip duplicate markets
+                        
+                        # Kelly stake sizing
+                        b = sig.odds - 1
+                        p = sig.confidence
+                        q = 1 - p
+                        kelly_frac = (b * p - q) / b if b > 0 else 0
+                        kelly_frac = max(0, min(kelly_frac, cfg.max_stake_pct))
+                        stake = round(balance * kelly_frac, 2)
+                        if stake < 1.0:
+                            stake = min(cfg.default_stake, balance * cfg.max_stake_pct)
+                        stake = round(max(stake, 1.0), 2)
+                        
+                        pid = paper_trader.place_bet(
+                            conn, sig.market_id, sig.selection_id,
+                            sig.event_name, sig.selection_name,
+                            sig.bet_type.value, sig.odds, stake
+                        )
+                        if pid:
+                            placed += 1
+                            balance -= stake
+                            print(f"[{now}] ✅ Placed {sig.bet_type.value} £{stake:.2f} on {sig.selection_name} @ {sig.odds:.2f}")
+                    
+                    print(f"[{now}] 📊 Placed {placed} paper trades from Pickwatch signals")
+                else:
+                    print(f"[{now}] 📭 No Pickwatch picks found for today")
+                    
+            except Exception as e:
+                print(f"[{now}] ⚠️ Pickwatch integration error: {e}")
+
+            # ── Betfair live (if credentials available) ──
             if app_key:
                 try:
                     _run_live_cycle(conn, cfg, now)
                 except Exception as e:
-                    print(f"[{now}] ❌ Live cycle error: {e}")
-            else:
-                print(f"[{now}] ⚠️ Demo mode: no BETFAIR_APP_KEY. Skipping live scan.")
+                    print(f"[{now}] ❌ Live Betfair cycle error: {e}")
 
-            # 2. Auto-settle positions
+            # ── Auto-settlement ──
             if cfg.auto_settle_enabled:
                 hours_limit = cfg.get("settlement_check_hours", 24)
                 positions = paper_trader.get_open_positions(conn)
