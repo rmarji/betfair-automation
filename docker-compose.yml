@@ -36,11 +36,11 @@ services:
 
     # Healthcheck override (if built-in one isn't sufficient)
     healthcheck:
-      test: ["CMD", "python3", "-c", "import betfair_cli, signal_engine, paper_trader; print('OK')"]
+      test: ["CMD", "python3", "-c", "import signal_engine, paper_trader, config; print('OK')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 30s
 
     # Volumes for persistence
     volumes:

@@ -50,8 +50,9 @@ COPY --from=builder /install /usr/local
 
 # Copy application code
 COPY *.py ./
-COPY config/ ./config/
-COPY scripts/ ./scripts/ 2>/dev/null || true
+COPY config.json ./
+# Scripts directory
+COPY scripts/ ./scripts/
 
 # Create data directory with proper permissions
 RUN mkdir -p /app/data && chown -R betfair:betfair /app
@@ -71,9 +72,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Expose port (if HTTP server is added)
 EXPOSE 8000
 
-# Healthcheck - verify the container can import its modules
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python3 -c "import betfair_cli, signal_engine, paper_trader; print('OK')" || exit 1
+# Healthcheck - verify core modules can be imported
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD python3 -c "import signal_engine, paper_trader, config; print('OK')" || exit 1
 
 # Switch to non-root user
 USER betfair
