@@ -51,8 +51,6 @@ COPY --from=builder /install /usr/local
 # Copy application code
 COPY *.py ./
 COPY config.json ./
-# Scripts directory
-COPY scripts/ ./scripts/
 
 # Create data directory with proper permissions
 RUN mkdir -p /app/data && chown -R betfair:betfair /app
@@ -67,7 +65,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     BETFAIR_USERNAME="" \
     BETFAIR_PASSWORD="" \
     BETFAIR_APP_KEY="" \
-    BETFAIR_CERTS_PATH="/app/certs"
+    BETFAIR_CERTS_PATH="/app/certs" \
+    SCAN_INTERVAL_MINUTES=30
 
 # Expose port (if HTTP server is added)
 EXPOSE 8000

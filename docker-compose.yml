@@ -33,6 +33,7 @@ services:
       - BETFAIR_PASSWORD=${BETFAIR_PASSWORD:-}
       - BETFAIR_APP_KEY=${BETFAIR_APP_KEY:-}
       - BETFAIR_CERTS_PATH=/app/certs
+      - SCAN_INTERVAL_MINUTES=${SCAN_INTERVAL_MINUTES:-30}
 
     # Healthcheck via HTTP endpoint
     healthcheck:
