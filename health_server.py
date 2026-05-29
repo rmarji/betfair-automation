@@ -108,49 +108,177 @@ class TradingAPIHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+def _run_live_cycle(conn, cfg, now):
+    """Execute a live trading cycle with Betfair credentials."""
+    import betfair_client
+
+    app_key = os.getenv("BETFAIR_APP_KEY")
+    username = os.getenv("BETFAIR_USERNAME")
+    cert_dir = os.getenv("BETFAIR_CERTS_PATH", "/app/certs")
+
+    # Resolve certificate paths
+    cert_path = os.path.join(cert_dir, "client-2048.crt")
+    key_path = os.path.join(cert_dir, "client-2048.key")
+
+    if not app_key or not username:
+        print(f"[{now}] ⚠️ Demo mode: BETFAIR_USERNAME or BETFAIR_APP_KEY not set.")
+        return
+
+    # Try cert-based auth first, fall back to interactive login
+    client = None
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        print(f"[{now}] 🔐 Cert-based auth detected")
+        try:
+            client = betfair_client.BetfairClient.from_certs(
+                username=username,
+                app_key=app_key,
+                cert_path=cert_path,
+                key_path=key_path,
+            )
+        except Exception as e:
+            print(f"[{now}] ⚠️ Cert auth failed: {e}, trying interactive login...")
+            client = None
+
+    if client is None:
+        password = os.getenv("BETFAIR_PASSWORD")
+        if not password:
+            print(f"[{now}] ❌ No cert files and BETFAIR_PASSWORD not set. Cannot authenticate.")
+            return
+        try:
+            client = betfair_client.BetfairClient.interactive(
+                username=username,
+                password=password,
+                app_key=app_key,
+            )
+        except Exception as e:
+            print(f"[{now}] ❌ Interactive login failed: {e}")
+            return
+
+    try:
+        print(f"[{now}] 🚀 Connected to Betfair. Scanning markets...")
+
+        # Map tracked sport names to Betfair sport IDs
+        sport_id_map = betfair_client.SPORT_IDS
+        all_markets = []
+
+        for sport_name in cfg.tracked_sports:
+            sport_id = sport_id_map.get(sport_name)
+            if not sport_id:
+                print(f"[{now}] ⚠️ Unknown sport: {sport_name}, skipping")
+                continue
+
+            try:
+                markets = client.list_markets(sport_id=sport_id, max_results=50)
+                all_markets.extend(markets)
+            except Exception as e:
+                print(f"[{now}] ⚠️ Error fetching {sport_name}: {e}")
+
+        if not all_markets:
+            print(f"[{now}] 📭 No markets found across tracked sports")
+            return
+
+        # Fetch odds for discovered markets (batch of 5 to stay within API limits)
+        market_ids = [m["market_id"] for m in all_markets]
+        odds_data = {}
+        for i in range(0, len(market_ids), 5):
+            batch = market_ids[i:i+5]
+            try:
+                books = client.get_market_odds(batch)
+                for book in books:
+                    odds_data[book["market_id"]] = book
+            except Exception as e:
+                print(f"[{now}] ⚠️ Odds batch error: {e}")
+
+        # Enrich markets with odds data and run signal engine
+        enriched = []
+        for m in all_markets:
+            mid = m["market_id"]
+            if mid in odds_data:
+                # Merge market catalogue + book data for signal engine
+                runners = []
+                for r in m.get("runners", []):
+                    # Find matching runner in odds data
+                    book_runners = [br for br in odds_data[mid].get("runners", [])
+                                    if br["selection_id"] == r["selection_id"]]
+                    if book_runners:
+                        br = book_runners[0]
+                        r["ex"] = {
+                            "availableToBack": br.get("back", []),
+                            "availableToLay": br.get("lay", []),
+                        }
+                    runners.append(r)
+                m["runners"] = runners
+            enriched.append(m)
+
+        engine = SignalEngine()
+        signals = engine.generate_signals(enriched)
+
+        print(f"[{now}] 📊 Found {len(signals)} signals from {len(enriched)} markets")
+
+        # Place paper bets for qualifying signals (Kelly Criterion sizing)
+        balance = paper_trader.get_balance(conn)
+        open_pos = paper_trader.get_open_positions(conn)
+        placed = 0
+        for sig in signals:
+            if len(open_pos) >= cfg.max_positions:
+                print(f"[{now}] ⛔ Max positions ({cfg.max_positions}) reached, skipping remaining signals")
+                break
+
+            # Kelly stake: f* = (b*p - q) / b where b=odds-1, p=confidence, q=1-p
+            b = sig.odds - 1  # net odds
+            p = sig.confidence
+            q = 1 - p
+            kelly_frac = (b * p - q) / b if b > 0 else 0
+            kelly_frac = max(0, min(kelly_frac, cfg.max_stake_pct))  # Cap at max_stake_pct
+            stake = round(balance * kelly_frac, 2)
+
+            # Fall back to default stake if Kelly is too small
+            if stake < 1.0:
+                stake = min(cfg.default_stake, balance * cfg.max_stake_pct)
+            stake = round(stake, 2)
+
+            if stake < 1.0:
+                continue
+            pid = paper_trader.place_bet(
+                conn,
+                sig.market_id, sig.selection_id, sig.event_name,
+                sig.selection_name, sig.bet_type.value, sig.odds,
+                stake,
+            )
+            if pid:
+                placed += 1
+                open_pos.append({"id": pid})  # Track locally for max check
+
+        print(f"[{now}] ✅ Placed {placed} paper trades from {len(signals)} signals")
+
+    finally:
+        if client:
+            client.logout()
+
+
 def trading_scheduler():
     """Background thread for periodic trading cycles."""
     interval_min = int(os.getenv("SCAN_INTERVAL_MINUTES", "30"))
     cfg = Config()
-    
+
     print(f"🕒 Trading scheduler started (Interval: {interval_min}m)")
-    
+
     while True:
         try:
             now = datetime.utcnow().isoformat()
             print(f"[{now}] 🔍 Starting trading cycle...")
 
             conn = paper_trader.init_db()
-            
-            # 1. Check credentials
+
+            # 1. Check credentials — run live cycle if available
             app_key = os.getenv("BETFAIR_APP_KEY")
-            app_secret = os.getenv("BETFAIR_APP_SECRET")
-            
-            if not app_key or not app_secret:
-                print(f"[{now}] ⚠️ Demo mode: no live credentials configured. Skipping live scan.")
-            else:
-                # Lazy import to prevent startup failure
+            if app_key:
                 try:
-                    import betfair_client
-                    print(f"[{now}] 🚀 Connecting to Betfair for live signals...")
-                    # Minimal implementation of the cycle
-                    # 1. Fetch markets -> 2. Generate signals -> 3. Place paper trades
-                    # Note: We assume betfair_client provides the glue
-                    client = betfair_client.BetfairClient()
-                    markets = client.get_markets(cfg.tracked_sports)
-                    
-                    engine = SignalEngine()
-                    signals = engine.generate_signals(markets)
-                    
-                    for sig in signals:
-                        paper_trader.place_bet(
-                            conn, 
-                            sig.market_id, sig.selection_id, sig.event_name, 
-                            sig.selection_name, sig.bet_type.value, sig.odds, 
-                            cfg.default_stake
-                        )
+                    _run_live_cycle(conn, cfg, now)
                 except Exception as e:
-                    print(f"[{now}] ❌ Error during live trading cycle: {e}")
+                    print(f"[{now}] ❌ Live cycle error: {e}")
+            else:
+                print(f"[{now}] ⚠️ Demo mode: no BETFAIR_APP_KEY. Skipping live scan.")
 
             # 2. Auto-settle positions
             if cfg.auto_settle_enabled:
@@ -160,15 +288,14 @@ def trading_scheduler():
                     opened_at = datetime.fromisoformat(pos["opened_at"])
                     if datetime.utcnow() - opened_at > timedelta(hours=hours_limit):
                         print(f"[{now}] ⏳ Auto-settling expired position {pos['id']} (Lost)")
-                        # Simple auto-settle as Lost for expired positions that weren't updated
                         paper_trader.settle_position(conn, pos["id"], won=False)
-            
+
             conn.close()
             print(f"[{now}] ✅ Trading cycle complete. Sleeping for {interval_min}m.")
-            
+
         except Exception as e:
             print(f"❌ Scheduler error: {e}")
-        
+
         time.sleep(interval_min * 60)
 
 def main():
