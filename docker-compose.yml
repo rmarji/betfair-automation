@@ -34,13 +34,13 @@ services:
       - BETFAIR_APP_KEY=${BETFAIR_APP_KEY:-}
       - BETFAIR_CERTS_PATH=/app/certs
 
-    # Healthcheck override (if built-in one isn't sufficient)
+    # Healthcheck via HTTP endpoint
     healthcheck:
-      test: ["CMD", "python3", "-c", "import signal_engine, paper_trader, config; print('OK')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 15s
 
     # Volumes for persistence
     volumes:

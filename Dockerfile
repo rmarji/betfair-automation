@@ -72,9 +72,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Expose port (if HTTP server is added)
 EXPOSE 8000
 
-# Healthcheck - verify core modules can be imported
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD python3 -c "import signal_engine, paper_trader, config; print('OK')" || exit 1
+# Healthcheck endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 # Switch to non-root user
 USER betfair
@@ -82,5 +82,5 @@ USER betfair
 # Use tini for proper signal handling
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Default command: run trading cycle
-CMD ["python3", "betfair_cli.py", "run"]
+# Default command: health server (override with docker-compose for trading)
+CMD ["python3", "health_server.py"]
