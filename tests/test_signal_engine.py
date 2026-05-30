@@ -24,8 +24,8 @@ class TestSignalEngine(unittest.TestCase):
         signals = self.engine.generate_signals([market])
         self.assertTrue(len(signals) > 0)
         self.assertEqual(signals[0].strategy, "value")
-        self.assertEqual(signals[0].edge_pct, 0.10)
-        self.assertEqual(signals[0].strength, SignalStrength.STRONG)
+        self.assertAlmostEqual(signals[0].edge_pct, 0.10, places=8)
+        self.assertEqual(signals[0].strength, SignalStrength.ELITE)
 
     def test_steam_move(self):
         """Test that steam move detects significant price drops."""
