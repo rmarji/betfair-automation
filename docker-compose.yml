@@ -48,6 +48,7 @@ services:
       - ./data:/app/data
       - ./certs:/app/certs:ro
       - ./config.json:/app/config.json:ro
+      - /data/workspace-cto/pickwatch-dashboard/pickwatch_history.db:/app/pickwatch_history.db:ro
 
     # Logging configuration
     logging:

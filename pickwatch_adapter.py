@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 
-PICKWATCH_DB = Path(__file__).parent.parent / "pickwatch-dashboard" / "pickwatch_history.db"
+PICKWATCH_DB = Path("/app/pickwatch_history.db")
 
 # Betfair sport IDs for sports that Pickwatch covers
 BETFAIR_SPORT_MAP = {
