@@ -171,7 +171,7 @@ def get_historical_picks(
     return picks
 
 
-def pickwatch_picks_to_market_data(picks: list[dict]) -> list[dict]:
+def pickwatch_picks_to_market_data(picks: list[dict], sport_config: dict = None) -> list[dict]:
     """
     Convert Pickwatch picks into Betfair market/runner format
     that SignalEngine can process via _pickwatch_edge strategy.
@@ -181,7 +181,16 @@ def pickwatch_picks_to_market_data(picks: list[dict]) -> list[dict]:
     - eventName: the matchup
     - runners: the picked team with odds
     - pickwatch_data: edge info for signal generation
+    
+    Args:
+        picks: List of Pickwatch pick dicts
+        sport_config: Optional dict of {sport: {min_edge, min_confidence, enabled}}
+                      When provided, filters picks by sport-specific thresholds.
     """
+    # Build per-sport threshold lookup
+    global_min_edge = 30.0  # Conservative default per backtesting
+    global_min_confidence = 0.6
+    
     markets = []
     
     for pick in picks:
@@ -190,6 +199,7 @@ def pickwatch_picks_to_market_data(picks: list[dict]) -> list[dict]:
         pick_team = pick.get("pick_team", "Unknown")
         odds_dec = pick.get("odds_decimal", 2.0)
         edge = (pick.get("edge") or 0) / 100.0  # Convert % to fraction
+        edge_pct = pick.get("edge") or 0  # Raw percentage for threshold check
         confidence = (pick.get("confidence_score") or 50) / 100.0  # Convert to 0-1
         recommendation = pick.get("recommendation", "LEAN")
         betfair_sport_id = BETFAIR_SPORT_MAP.get(sport)
@@ -198,8 +208,21 @@ def pickwatch_picks_to_market_data(picks: list[dict]) -> list[dict]:
         if recommendation not in ("BET", "STRONG BET"):
             continue
         
-        # Minimum confidence filter
-        if confidence < 0.6:
+        # Apply sport-specific thresholds if available
+        if sport_config:
+            sport_cfg = sport_config.get(sport, {})
+            if not sport_cfg.get("enabled", True):
+                continue  # Skip disabled sports
+            min_edge = sport_cfg.get("min_edge", global_min_edge)
+            min_conf = sport_cfg.get("min_confidence", global_min_confidence)
+        else:
+            min_edge = global_min_edge
+            min_conf = global_min_confidence
+        
+        # Minimum edge and confidence filters (sport-aware)
+        if edge_pct < min_edge:
+            continue
+        if confidence < min_conf:
             continue
         
         selection_id = hash(pick_team) % 100000  # Stable synthetic ID

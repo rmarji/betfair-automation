@@ -62,9 +62,9 @@ class TestConfigDefaults(unittest.TestCase):
         self.assertEqual(cfg.max_odds, 10.0)
     
     def test_default_signal_params(self):
-        """Test default signal parameters."""
+        """Test default signal parameters (MLB-optimized per backtesting)."""
         cfg = config_module.Config()
-        self.assertEqual(cfg.min_edge, 2.0)
+        self.assertEqual(cfg.min_edge, 30.0)  # Raised from 2.0 per backtesting
         self.assertEqual(cfg.min_confidence, 0.6)
     
     def test_default_strategy_weights(self):
@@ -80,13 +80,11 @@ class TestConfigDefaults(unittest.TestCase):
         self.assertAlmostEqual(total, 1.0, places=2)
     
     def test_default_tracked_sports(self):
-        """Test default tracked sports list."""
+        """Test default tracked sports list (MLB-focused per backtesting)."""
         cfg = config_module.Config()
         sports = cfg.tracked_sports
         
-        self.assertIn("soccer", sports)
-        self.assertIn("horse_racing", sports)
-        self.assertIn("tennis", sports)
+        self.assertIn("baseball", sports)  # MLB-only default per backtesting
     
     def test_default_auto_settle(self):
         """Test auto settle is enabled by default."""
@@ -304,7 +302,7 @@ class TestFormatConfigDisplay(unittest.TestCase):
         
         self.assertIn("£1,000.00", output)  # Initial balance
         self.assertIn("5", output)  # Max positions
-        self.assertIn("soccer", output)  # Sport
+        self.assertIn("baseball", output)  # MLB-focused sport
 
 
 if __name__ == "__main__":

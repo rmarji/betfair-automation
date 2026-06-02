@@ -5,7 +5,7 @@
   "max_stake_pct": 0.05,
   "min_odds": 1.1,
   "max_odds": 10.0,
-  "min_edge": 2.0,
+  "min_edge": 30.0,
   "min_confidence": 0.6,
   "strategy_weights": {
     "value": 0.5,
@@ -13,12 +13,31 @@
     "arbitrage": 0.2
   },
   "tracked_sports": [
-    "soccer",
-    "horse_racing",
-    "tennis",
-    "basketball",
-    "american_football"
+    "baseball"
   ],
   "auto_settle_enabled": true,
-  "settlement_check_hours": 24
+  "settlement_check_hours": 24,
+  "sport_thresholds": {
+    "baseball": {
+      "min_edge": 30.0,
+      "min_confidence": 0.6,
+      "enabled": true
+    },
+    "basketball": {
+      "min_edge": 30.0,
+      "min_confidence": 0.65,
+      "enabled": false
+    },
+    "ice_hockey": {
+      "min_edge": 30.0,
+      "min_confidence": 0.65,
+      "enabled": false
+    },
+    "american_football": {
+      "min_edge": 30.0,
+      "min_confidence": 0.65,
+      "enabled": false
+    }
+  },
+  "betfair_commission": 0.05
 }

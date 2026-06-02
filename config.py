@@ -31,7 +31,7 @@ DEFAULTS = {
     "max_odds": 10.0,                # Maximum acceptable odds (avoid longshots)
     
     # Signal Parameters
-    "min_edge": 2.0,                 # Minimum edge % to trigger trade
+    "min_edge": 30.0,                # Minimum edge % to trigger trade (backtested: MLB ≥30%)
     "min_confidence": 0.6,           # Minimum signal confidence (0-1)
     
     # Strategy Weights (must sum to 1.0)
@@ -41,14 +41,38 @@ DEFAULTS = {
         "arbitrage": 0.2,            # Arb opportunities
     },
     
-    # Markets to Track
+    # Markets to Track (MLB-focused per backtesting results)
     "tracked_sports": [
-        "soccer",
-        "horse_racing",
-        "tennis",
-        "basketball",
-        "american_football",
+        "baseball",
     ],
+    
+    # Per-sport thresholds (override global min_edge/min_confidence)
+    # Backtesting showed only MLB ≥30% edge, ≥60% confidence is profitable
+    "sport_thresholds": {
+        "baseball": {
+            "min_edge": 30.0,
+            "min_confidence": 0.6,
+            "enabled": True,
+        },
+        "basketball": {
+            "min_edge": 30.0,
+            "min_confidence": 0.65,
+            "enabled": False,
+        },
+        "ice_hockey": {
+            "min_edge": 30.0,
+            "min_confidence": 0.65,
+            "enabled": False,
+        },
+        "american_football": {
+            "min_edge": 30.0,
+            "min_confidence": 0.65,
+            "enabled": False,
+        },
+    },
+    
+    # Betfair commission on net winnings (standard rate)
+    "betfair_commission": 0.05,      # 5% standard rate
     
     # Auto-settlement
     "auto_settle_enabled": True,     # Auto-settle expired positions
@@ -155,6 +179,23 @@ class Config:
     @property
     def auto_settle_enabled(self) -> bool:
         return self._data["auto_settle_enabled"]
+    
+    @property
+    def sport_thresholds(self) -> Dict[str, Any]:
+        return self._data.get("sport_thresholds", {})
+    
+    @property
+    def betfair_commission(self) -> float:
+        return self._data.get("betfair_commission", 0.05)
+    
+    def get_sport_config(self, sport: str) -> Dict[str, Any]:
+        """Get sport-specific thresholds merged with global defaults."""
+        sport_cfg = self.sport_thresholds.get(sport, {})
+        return {
+            "min_edge": sport_cfg.get("min_edge", self.min_edge),
+            "min_confidence": sport_cfg.get("min_confidence", self.min_confidence),
+            "enabled": sport_cfg.get("enabled", True),
+        }
 
 
 def format_config_display(cfg: Config) -> str:

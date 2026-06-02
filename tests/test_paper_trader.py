@@ -122,6 +122,71 @@ class TestPaperTrader(unittest.TestCase):
         self.assertEqual(pt.MAX_POSITIONS, 5)
         self.assertEqual(pt.DEFAULT_STAKE, 10.0)
 
+    def test_lay_win_with_commission(self):
+        """LAY win deducts 5% commission from net winnings."""
+        # LAY £10 @ 3.0: liability = 10*(3-1) = £20, locked from balance
+        # Balance after placing: 1000 - 20 = 980
+        pos_id = pt.place_bet(
+            conn=self.conn,
+            market_id='1.234',
+            selection_id=1,
+            event_name='Test',
+            selection_name='Team B',
+            bet_type='LAY',
+            odds=3.0,
+            stake=10.0
+        )
+        
+        # won=True means our lay WON (selection lost)
+        pt.settle_position(self.conn, pos_id, won=True, commission=0.05)
+        
+        # Net winnings: £10 (stake won) - 5% commission = £9.50
+        # Balance: 980 + 20 (liability return) + 10 (win) - 0.50 (commission) = 1009.50
+        final_balance = pt.get_balance(self.conn)
+        self.assertAlmostEqual(final_balance, 1009.50, places=2)
+
+    def test_back_win_with_commission(self):
+        """BACK win deducts 5% Betfair commission from net winnings."""
+        # Place a BACK bet: £10 @ 3.0 odds → potential profit = £20, stake = £10
+        pos_id = pt.place_bet(
+            conn=self.conn,
+            market_id='1.234',
+            selection_id=1,
+            event_name='Test',
+            selection_name='Team A',
+            bet_type='BACK',
+            odds=3.0,
+            stake=10.0
+        )
+        # Balance after placing: 1000 - 10 = 990
+        
+        # won=True means our back bet WON (selection won)
+        pt.settle_position(self.conn, pos_id, won=True, commission=0.05)
+        
+        # Net winnings: £20 profit - 5% commission = £19
+        # Balance: 990 + 10 (stake return) + 20 (profit) - 1 (commission) = 1019
+        final_balance = pt.get_balance(self.conn)
+        self.assertAlmostEqual(final_balance, 1019.00, places=2)
+
+    def test_back_loss_no_commission(self):
+        """BACK loss: no commission (nothing won)."""
+        pos_id = pt.place_bet(
+            conn=self.conn,
+            market_id='1.234',
+            selection_id=1,
+            event_name='Test',
+            selection_name='Team A',
+            bet_type='BACK',
+            odds=2.5,
+            stake=10.0
+        )
+        
+        pt.settle_position(self.conn, pos_id, won=False, commission=0.05)
+        
+        # Lost: stake was already deducted, no additional commission
+        final_balance = pt.get_balance(self.conn)
+        self.assertEqual(final_balance, 990.0)  # 1000 - 10 stake
+
 
 if __name__ == "__main__":
     unittest.main()

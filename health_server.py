@@ -24,6 +24,15 @@ from config import Config
 import paper_trader
 from signal_engine import SignalEngine
 
+# Import pickwatch adapter for real signals
+try:
+    from pickwatch_adapter import (
+        get_todays_picks, pickwatch_picks_to_market_data, compute_pickwatch_stats
+    )
+    PICKWATCH_AVAILABLE = True
+except ImportError:
+    PICKWATCH_AVAILABLE = False
+
 class TradingAPIHandler(BaseHTTPRequestHandler):
     """API handler for Betfair Automation."""
 
@@ -76,26 +85,35 @@ class TradingAPIHandler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
 
-        # 4. Signals Endpoint
+        # 4. Signals Endpoint (real Pickwatch data)
         elif self.path == "/signals":
-            # Run SignalEngine demo mock data
+            if not PICKWATCH_AVAILABLE:
+                return self._send_json({"picks_available": False, "signals": []}, 503)
+            
+            cfg = Config()
+            picks = get_todays_picks()
+            if not picks:
+                return self._send_json({"picks_available": False, "signals": [], "pick_count": 0})
+            
+            # Apply sport-specific thresholds from config
+            markets = pickwatch_picks_to_market_data(picks, sport_config=cfg.sport_thresholds)
+            if not markets:
+                return self._send_json({
+                    "picks_available": True,
+                    "pick_count": len(picks),
+                    "signals": [],
+                    "message": "No picks passed sport-specific thresholds"
+                })
+            
             engine = SignalEngine()
-            # We simulate a market for the demo as seen in signal_engine.demo()
-            mock_market = {
-                "marketId": "1.234567890",
-                "eventName": "API Demo: Market A vs B",
-                "runners": [
-                    {
-                        "selectionId": 12345,
-                        "runnerName": "Selection A",
-                        "ex": {"availableToBack": [{"price": 2.20, "size": 500}]}
-                    }
-                ],
-                "fair_odds": {12345: 2.05}
-            }
-            signals = engine.generate_signals([mock_market])
+            signals = engine.generate_signals(markets)
             data = [s.to_dict() for s in signals]
-            return self._send_json(data)
+            return self._send_json({
+                "picks_available": True,
+                "pick_count": len(picks),
+                "filtered_count": len(markets),
+                "signals": data
+            })
 
         # 5. Config Endpoint
         elif self.path == "/config":
@@ -275,6 +293,9 @@ def trading_scheduler():
             # ── Pickwatch-driven paper trading ──
             app_key = os.getenv("BETFAIR_APP_KEY")
             placed = 0
+            
+            # Default settlement commission from config
+            commission = cfg.betfair_commission
 
             try:
                 from pickwatch_adapter import (
@@ -283,12 +304,12 @@ def trading_scheduler():
                 picks = get_todays_picks()
                 
                 if picks:
-                    # Convert Pickwatch picks to market format
-                    markets = pickwatch_picks_to_market_data(picks)
+                    # Convert Pickwatch picks to market format with sport-specific thresholds
+                    markets = pickwatch_picks_to_market_data(picks, sport_config=cfg.sport_thresholds)
                     engine = SignalEngine()
                     signals = engine.generate_signals(markets)
                     
-                    print(f"[{now}] 📡 Found {len(signals)} signals from {len(picks)} Pickwatch picks")
+                    print(f"[{now}] 📡 Found {len(signals)} signals from {len(picks)} Pickwatch picks ({len(markets)} markets passed filters)")
                     
                     existing_markets = {p["market_id"] for p in open_pos}
                     
@@ -334,7 +355,7 @@ def trading_scheduler():
                 except Exception as e:
                     print(f"[{now}] ❌ Live Betfair cycle error: {e}")
 
-            # ── Auto-settlement ──
+            # ── Auto-settlement (with Betfair commission) ──
             if cfg.auto_settle_enabled:
                 hours_limit = cfg.get("settlement_check_hours", 24)
                 positions = paper_trader.get_open_positions(conn)
@@ -342,7 +363,7 @@ def trading_scheduler():
                     opened_at = datetime.fromisoformat(pos["opened_at"])
                     if datetime.utcnow() - opened_at > timedelta(hours=hours_limit):
                         print(f"[{now}] ⏳ Auto-settling expired position {pos['id']} (Lost)")
-                        paper_trader.settle_position(conn, pos["id"], won=False)
+                        paper_trader.settle_position(conn, pos["id"], won=False, commission=commission)
 
             conn.close()
             print(f"[{now}] ✅ Trading cycle complete. Sleeping for {interval_min}m.")

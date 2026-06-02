@@ -254,7 +254,7 @@ class TestPickwatchPicksToMarketData(unittest.TestCase):
             {
                 "id": 1, "sport": "MLB", "matchup": "Yankees vs Red Sox",
                 "pick_team": "Yankees", "pick_type": "ML",
-                "odds_american": -110, "edge": 28.0,
+                "odds_american": -110, "edge": 30.0,
                 "confidence_score": 75.0, "value_rating": 4.0,
                 "recommendation": "BET", "outcome": None,
             }
@@ -292,9 +292,9 @@ class TestPickwatchPicksToMarketData(unittest.TestCase):
     def test_low_confidence_filtered_out(self):
         picks = [
             {
-                "id": 4, "sport": "NHL", "matchup": "Leafs vs Bruins",
+                "id": 4, "sport": "MLB", "matchup": "Leafs vs Bruins",
                 "pick_team": "Leafs", "pick_type": "ML",
-                "odds_american": -110, "edge": 20.0,
+                "odds_american": -110, "edge": 35.0,
                 "confidence_score": 50.0, "value_rating": 2.0,
                 "recommendation": "BET", "outcome": None,
             }
@@ -302,12 +302,43 @@ class TestPickwatchPicksToMarketData(unittest.TestCase):
         markets = pickwatch_picks_to_market_data(picks)
         self.assertEqual(len(markets), 0)  # Below 60% confidence threshold
 
+    def test_low_edge_filtered_out(self):
+        """Picks below min_edge threshold are filtered out."""
+        picks = [
+            {
+                "id": 7, "sport": "MLB", "matchup": "Angels vs A's",
+                "pick_team": "Angels", "pick_type": "ML",
+                "odds_american": -110, "edge": 15.0,
+                "confidence_score": 70.0, "value_rating": 2.0,
+                "recommendation": "BET", "outcome": None,
+            }
+        ]
+        markets = pickwatch_picks_to_market_data(picks)
+        self.assertEqual(len(markets), 0)  # Below 30% edge threshold
+
+    def test_sport_config_disabled_sport(self):
+        """Picks from disabled sports are filtered out."""
+        picks = [
+            {
+                "id": 8, "sport": "NBA", "matchup": "Lakers vs Warriors",
+                "pick_team": "Lakers", "pick_type": "ML",
+                "odds_american": -110, "edge": 35.0,
+                "confidence_score": 70.0, "value_rating": 3.0,
+                "recommendation": "BET", "outcome": None,
+            }
+        ]
+        # NBA is disabled in default sport_thresholds
+        markets = pickwatch_picks_to_market_data(picks, sport_config={
+            "NBA": {"min_edge": 30.0, "min_confidence": 0.65, "enabled": False}
+        })
+        self.assertEqual(len(markets), 0)  # NBA is disabled
+
     def test_market_has_correct_structure(self):
         picks = [
             {
                 "id": 5, "sport": "MLB", "matchup": "Cubs vs Cards",
                 "pick_team": "Cubs", "pick_type": "ML",
-                "odds_american": -150, "edge": 25.0,
+                "odds_american": -150, "edge": 30.0,
                 "confidence_score": 70.0, "value_rating": 3.0,
                 "recommendation": "BET", "outcome": None,
             }
@@ -326,10 +357,10 @@ class TestPickwatchPicksToMarketData(unittest.TestCase):
     def test_runner_has_back_and_lay_odds(self):
         picks = [
             {
-                "id": 6, "sport": "NBA", "matchup": "Heat vs Celtics",
+                "id": 6, "sport": "MLB", "matchup": "Heat vs Celtics",
                 "pick_team": "Heat", "pick_type": "ML",
                 "odds_american": 120, "odds_decimal": 2.20,
-                "edge": 28.0, "confidence_score": 72.0, "value_rating": 3.5,
+                "edge": 30.0, "confidence_score": 72.0, "value_rating": 3.5,
                 "recommendation": "BET", "outcome": None,
             }
         ]

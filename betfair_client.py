@@ -55,6 +55,7 @@ SPORT_IDS = {
     "american_football": 6423,  # NFL
     "basketball": 7522,          # NBA
     "ice_hockey": 7524,          # NHL
+    "baseball": 7523,            # MLB
 }
 
 # Market types

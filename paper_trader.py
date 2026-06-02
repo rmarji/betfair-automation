@@ -190,8 +190,19 @@ def place_bet(
     return position_id
 
 
-def settle_position(conn: sqlite3.Connection, position_id: int, won: bool):
-    """Settle a position as won or lost."""
+def settle_position(conn: sqlite3.Connection, position_id: int, won: bool, commission: float = 0.05):
+    """
+    Settle a position as won or lost, with Betfair commission deducted on net winnings.
+    
+    For BACK bets: won=True means the selection won (our back bet won).
+    For LAY bets: won=True means the selection lost (our lay bet won).
+    
+    Args:
+        conn: Database connection
+        position_id: Position to settle
+        won: Whether our position was correct (True = we profit)
+        commission: Betfair commission rate on net winnings (default 5%)
+    """
     c = conn.cursor()
     c.execute("SELECT * FROM positions WHERE id = ?", (position_id,))
     pos = c.fetchone()
@@ -207,24 +218,35 @@ def settle_position(conn: sqlite3.Connection, position_id: int, won: bool):
     balance = get_balance(conn)
     bet_type = pos["bet_type"]
     
-    # Calculate P&L
+    # Calculate P&L (with Betfair commission on net winnings)
     if bet_type == "BACK":
         if won:
-            profit = pos["potential_profit"] + pos["stake"]  # Return stake + profit
+            # We backed the selection, it won
+            gross_profit = pos["potential_profit"]  # (odds-1)*stake
+            commission_deduction = gross_profit * commission
+            profit = pos["potential_profit"] + pos["stake"] - commission_deduction
+            result_profit = gross_profit - commission_deduction
             status = "WON"
         else:
+            # We backed the selection, it lost
             profit = 0  # Stake already deducted
+            result_profit = -(pos["stake"])
             status = "LOST"
     else:  # LAY
-        if won:  # Selection won = lay bet lost
-            profit = 0  # Liability already deducted
-            status = "LOST"
-        else:  # Selection lost = lay bet won
-            profit = pos["potential_profit"] + pos["potential_loss"]  # Return liability + profit
+        if won:
+            # We laid the selection, it lost → our lay won
+            gross_profit = pos["potential_profit"]  # stake amount we won
+            commission_deduction = gross_profit * commission
+            profit = pos["potential_profit"] + pos["potential_loss"] - commission_deduction
+            result_profit = gross_profit - commission_deduction
             status = "WON"
+        else:
+            # We laid the selection, it won → our lay lost
+            profit = 0  # Liability already deducted
+            result_profit = -(pos["potential_loss"])
+            status = "LOST"
     
     new_balance = balance + profit
-    result_profit = profit - (pos["stake"] if bet_type == "BACK" else pos["potential_loss"])
     
     # Update position
     c.execute("""
@@ -245,7 +267,8 @@ def settle_position(conn: sqlite3.Connection, position_id: int, won: bool):
     conn.commit()
     
     emoji = "🎉" if status == "WON" else "😢"
-    print(f"{emoji} Position {position_id} {status}: £{result_profit:+.2f}")
+    comm_str = f" (commission: £{abs(result_profit) * commission:.2f})" if status == "WON" else ""
+    print(f"{emoji} Position {position_id} {status}: £{result_profit:+.2f}{comm_str}")
 
 
 def show_status(conn: sqlite3.Connection):
