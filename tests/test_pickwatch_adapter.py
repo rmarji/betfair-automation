@@ -15,6 +15,9 @@ from pickwatch_adapter import (
     get_historical_picks,
     pickwatch_picks_to_market_data,
     compute_pickwatch_stats,
+    _american_to_implied_prob,
+    _compute_confidence,
+    fetch_picks_via_api,
 )
 
 
@@ -122,7 +125,7 @@ class TestGetTodaysPicks(unittest.TestCase):
             ]
             _create_test_db(db_path, picks)
 
-            result = get_todays_picks(db_path=db_path)
+            result = get_todays_picks(db_path=db_path, use_api=False)
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]["sport"], "MLB")
         finally:
@@ -139,13 +142,13 @@ class TestGetTodaysPicks(unittest.TestCase):
             conn.commit()
             conn.close()
 
-            result = get_todays_picks(db_path=db_path)
+            result = get_todays_picks(db_path=db_path, use_api=False)
             self.assertEqual(len(result), 0)
         finally:
             os.unlink(db_path)
 
     def test_nonexistent_db(self):
-        result = get_todays_picks(db_path="/tmp/nonexistent_12345.db")
+        result = get_todays_picks(db_path="/tmp/nonexistent_12345.db", use_api=False)
         self.assertEqual(result, [])
 
     def test_odds_decimal_conversion_in_picks(self):
@@ -158,7 +161,7 @@ class TestGetTodaysPicks(unittest.TestCase):
             ]
             _create_test_db(db_path, picks)
 
-            result = get_todays_picks(db_path=db_path)
+            result = get_todays_picks(db_path=db_path, use_api=False)
             self.assertEqual(len(result), 1)
             self.assertAlmostEqual(result[0]["odds_decimal"], 1.91)
         finally:
@@ -180,7 +183,7 @@ class TestGetUnresolvedPicks(unittest.TestCase):
             ]
             _create_test_db(db_path, picks)
 
-            result = get_unresolved_picks(db_path=db_path)
+            result = get_unresolved_picks(db_path=db_path, use_api=False)
             # Should return picks with None or empty outcome
             self.assertGreaterEqual(len(result), 2)
             for p in result:
@@ -453,6 +456,101 @@ class TestComputePickwatchStats(unittest.TestCase):
     def test_nonexistent_db_returns_empty(self):
         stats = compute_pickwatch_stats(db_path="/tmp/nonexistent_99999.db")
         self.assertEqual(stats, {})
+
+
+class TestHTTPAPIFunctions(unittest.TestCase):
+    """Test new HTTP API-based fetching functions."""
+    
+    def test_american_to_implied_prob_positive(self):
+        # +100 → 50%
+        self.assertAlmostEqual(_american_to_implied_prob(100), 0.5)
+    
+    def test_american_to_implied_prob_negative(self):
+        # -110 → 52.4%
+        self.assertAlmostEqual(_american_to_implied_prob(-110), 0.524, places=2)
+    
+    def test_american_to_implied_prob_zero(self):
+        self.assertAlmostEqual(_american_to_implied_prob(0), 0.5)
+    
+    def test_american_to_implied_prob_none(self):
+        self.assertAlmostEqual(_american_to_implied_prob(None), 0.5)
+    
+    def test_american_to_implied_prob_large_positive(self):
+        # +300 → 25%
+        self.assertAlmostEqual(_american_to_implied_prob(300), 0.25)
+    
+    def test_compute_confidence_experts_only(self):
+        # 70% experts, no fans, no CPU
+        conf = _compute_confidence(70, 0, 0, 5)
+        self.assertAlmostEqual(conf, 70.0)
+    
+    def test_compute_confidence_blended(self):
+        # 70% experts, 60% fans, 0.8 CPU
+        conf = _compute_confidence(70, 60, 0.8, 5)
+        self.assertGreater(conf, 60)
+        self.assertLess(conf, 75)
+    
+    def test_compute_confidence_zero(self):
+        conf = _compute_confidence(0, 0, 0, 0)
+        self.assertEqual(conf, 0.0)
+    
+    def test_compute_confidence_expert_count_bonus(self):
+        # 10+ expert picks should get a bonus
+        conf_low = _compute_confidence(70, 60, 0.7, 5)
+        conf_high = _compute_confidence(70, 60, 0.7, 15)
+        self.assertGreater(conf_high, conf_low)
+    
+    def test_fetch_picks_via_api_with_mock(self):
+        """Test API fetch with mocked HTTP response."""
+        import json
+        from unittest.mock import patch, MagicMock
+        
+        mock_games = [{
+            "id": 12345,
+            "home_team_id": "Yankees",
+            "road_team_id": "Red Sox",
+            "game_state": "Scheduled",
+            "home_team_odds_ame": -150,
+            "road_team_odds_ame": 130,
+            "ht_pct_su_experts": 72,
+            "rt_pct_su_experts": 28,
+            "picks_su_experts": 12,
+            "ht_pct_su_fans": 65,
+            "rt_pct_su_fans": 35,
+        }]
+        
+        def mock_api_get(path, origin=""):
+            if "games" in path:
+                return mock_games
+            if "premium-picks" in path:
+                return []
+            return []
+        
+        with patch('pickwatch_adapter._api_get', side_effect=mock_api_get):
+            picks = fetch_picks_via_api(sport="MLB", day="2026-06-06")
+            self.assertGreater(len(picks), 0)
+            # Yankees should be picked (72% experts)
+            yankees_picks = [p for p in picks if p["pick_team"] == "Yankees"]
+            self.assertGreater(len(yankees_picks), 0)
+            self.assertEqual(yankees_picks[0]["sport"], "MLB")
+    
+    def test_get_todays_picks_api_fallback(self):
+        """Test that get_todays_picks falls back to DB when use_api=False."""
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            db_path = f.name
+        
+        try:
+            picks = [
+                {"sport": "MLB", "matchup": "Yankees vs Red Sox", "pick_team": "Yankees", "edge": 35.0, "confidence_score": 80.0, "recommendation": "STRONG BET"},
+            ]
+            _create_test_db(db_path, picks)
+            
+            # use_api=False should skip API and go straight to DB
+            result = get_todays_picks(db_path=db_path, use_api=False)
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["sport"], "MLB")
+        finally:
+            os.unlink(db_path)
 
 
 if __name__ == "__main__":

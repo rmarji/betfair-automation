@@ -2,24 +2,42 @@
 """
 Pickwatch → Betfair Adapter
 
-Reads Pickwatch picks from the local SQLite DB and converts them into
-Betfair-compatible market/runner structures for the SignalEngine.
+Fetches Pickwatch picks via HTTP API (primary) or local SQLite DB (fallback)
+and converts them into Betfair-compatible market/runner structures for the SignalEngine.
 
 Key conversions:
 - American odds → Decimal odds (Betfair format)
 - ML (Moneyline) picks → BACK signals on match odds markets
 - Edge % → SignalEngine confidence + edge_pct
+
+Data sources (in priority order):
+1. Pickwatch API via n8n proxy (real-time, no local file needed)
+2. Local SQLite DB (fallback for offline/historical use)
 """
 
+import json
+import os
 import sqlite3
+import ssl
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
+from urllib.request import urlopen, Request
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 
 
 PICKWATCH_DB = Path("/app/pickwatch_history.db")
 
-# Betfair sport IDs for sports that Pickwatch covers
+# HTTP API configuration
+PICKWATCH_PROXY_URL = os.getenv(
+    "PICKWATCH_PROXY_URL",
+    "https://n8n.claw.jogeeks.com/webhook/pickwatch-proxy"
+)
+PICKWATCH_TOKEN = os.getenv("PICKWATCH_TOKEN", "")
+
+# Sport → Pickwatch API sport name mapping
+# Betfair sport IDs → Pickwatch sport keys
 BETFAIR_SPORT_MAP = {
     "NBA": 7522,
     "NHL": 7524,
@@ -28,6 +46,240 @@ BETFAIR_SPORT_MAP = {
     "NCAAB": 7379,
     "NCAAF": 7380,
 }
+
+# Pickwatch sport key → Pickwatch origin domain
+PICKWATCH_SPORT_URLS = {
+    "NBA": "https://nbapickwatch.com",
+    "NHL": "https://nhlpickwatch.com",
+    "MLB": "https://mlbpickwatch.com",
+    "NFL": "https://nflpickwatch.com",
+}
+
+# Which sports to fetch via API (match tracked_sports)
+API_TRACKED_SPORTS = os.getenv(
+    "PICKWATCH_SPORTS",
+    "NBA,NHL,MLB,NFL"
+).split(",")
+
+# ── HTTP API Functions ────────────────────────────────────────────────
+
+def _api_get(path: str, origin: str = "https://nflpickwatch.com") -> list | dict:
+    """Fetch data from Pickwatch API via n8n proxy."""
+    from urllib.parse import quote as url_quote
+    url = f"{PICKWATCH_PROXY_URL}?path={url_quote(path, safe='')}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (BetfairAutomation/1.0)",
+    }
+    req = Request(url, headers=headers)
+    ssl_ctx = ssl.create_default_context()
+    try:
+        with urlopen(req, context=ssl_ctx, timeout=30) as resp:
+            data = resp.read().decode()
+            if not data:
+                return []
+            return json.loads(data)
+    except HTTPError as e:
+        if e.code in (404, 500):
+            return []
+        print(f"⚠️  Pickwatch API error: {e.code} {e.reason}")
+        return []
+    except (URLError, TimeoutError) as e:
+        print(f"⚠️  Pickwatch API connection error: {e}")
+        return []
+    except json.JSONDecodeError:
+        return []
+
+
+def _score_pick_from_api(game: dict, cpu_picks: dict, sport: str) -> Optional[dict]:
+    """
+    Convert a raw Pickwatch API game dict into a scored pick dict.
+    
+    Applies the same scoring logic as the pickwatch-dashboard's ConfidenceScorer,
+    producing a pick compatible with get_todays_picks() output format.
+    """
+    game_id = game.get("id", 0)
+    home_team = game.get("home_team_id", "")
+    away_team = game.get("road_team_id", "")
+    home_odds = game.get("home_team_odds_ame") or 0
+    away_odds = game.get("road_team_odds_ame") or 0
+    game_state = game.get("game_state", "Scheduled")
+    
+    # Skip finished games
+    if game_state in ("Final", "F/OT", "F"):
+        return None
+    
+    # Expert consensus
+    expert_home = game.get("ht_pct_su_experts") or 0
+    expert_away = game.get("rt_pct_su_experts") or 0
+    expert_picks_count = game.get("picks_su_experts") or 0
+    
+    # Fan consensus
+    fan_home = game.get("ht_pct_su_fans") or 0
+    fan_away = game.get("rt_pct_su_fans") or 0
+    
+    # CPU premium picks
+    cpu_data = cpu_picks.get(game_id, {})
+    cpu_pick_team = cpu_data.get("team", "")
+    cpu_confidence = cpu_data.get("confidence", 0)
+    
+    # Determine which side to pick (the one with more expert support)
+    picks = []
+    for side, team, odds, expert_pct, fan_pct in [
+        ("home", home_team, home_odds, expert_home, fan_home),
+        ("away", away_team, away_odds, expert_away, fan_away),
+    ]:
+        if not team or expert_pct < 50:
+            continue  # Skip side with minority expert support
+        
+        # Calculate edge and confidence
+        cpu_conf = cpu_confidence if cpu_pick_team == team else (1 - cpu_confidence) if cpu_confidence else 0
+        
+        # Edge calculation: expert_pct as proxy for true probability
+        # If experts say 70% and odds imply 55%, edge = 15%
+        implied_prob = _american_to_implied_prob(odds)
+        edge = round(expert_pct - (implied_prob * 100), 1)
+        
+        # Confidence score: weighted blend of expert %, fan %, CPU
+        confidence = _compute_confidence(expert_pct, fan_pct, cpu_conf, expert_picks_count)
+        
+        # Value rating (1-5 stars)
+        value_rating = min(5, max(1, int(edge / 10) + 1))
+        
+        # Recommendation
+        if edge >= 30 and confidence >= 70:
+            recommendation = "STRONG BET"
+        elif edge >= 15 and confidence >= 50:
+            recommendation = "BET"
+        elif edge >= 5 and confidence >= 40:
+            recommendation = "LEAN"
+        else:
+            recommendation = "PASS"
+        
+        pick = {
+            "id": f"{sport}-{game_id}-{side}",
+            "sport": sport,
+            "date": str(date.today()),
+            "matchup": f"{away_team} @ {home_team}",
+            "pick_team": team,
+            "pick_type": "ML",
+            "odds_american": odds,
+            "odds_decimal": american_to_decimal(odds),
+            "edge": edge,
+            "confidence_score": round(confidence, 1),
+            "value_rating": value_rating,
+            "recommendation": recommendation,
+            "outcome": None,  # Unresolved
+            "source": "api",
+        }
+        picks.append(pick)
+    
+    # Return only the strongest pick per game
+    if len(picks) > 1:
+        picks.sort(key=lambda p: (p["edge"], p["confidence_score"]), reverse=True)
+    return picks[0] if picks else None
+
+
+def _american_to_implied_prob(odds: int) -> float:
+    """Convert American odds to implied probability (0-1)."""
+    if odds is None or odds == 0:
+        return 0.5
+    if odds > 0:
+        return 100 / (odds + 100)
+    else:
+        return abs(odds) / (abs(odds) + 100)
+
+
+def _compute_confidence(expert_pct: float, fan_pct: float, cpu_conf: float, expert_count: int) -> float:
+    """Compute blended confidence score from expert, fan, and CPU data."""
+    weights = []
+    scores = []
+    
+    if expert_pct > 0:
+        weights.append(0.5)
+        scores.append(expert_pct)
+    if fan_pct > 0:
+        weights.append(0.2)
+        scores.append(fan_pct)
+    if cpu_conf > 0:
+        weights.append(0.3)
+        scores.append(cpu_conf * 100)
+    
+    if not weights:
+        return 0.0
+    
+    # Weighted average
+    total_weight = sum(weights)
+    confidence = sum(w * s for w, s in zip(weights, scores)) / total_weight
+    
+    # Bonus for more expert picks (more data = more confidence)
+    if expert_count >= 10:
+        confidence = min(100, confidence + 5)
+    
+    return confidence
+
+
+def fetch_picks_via_api(sport: str = None, day: str = None) -> list[dict]:
+    """
+    Fetch today's picks directly from Pickwatch API via n8n proxy.
+    
+    This is the PRIMARY data source — no local SQLite dependency needed.
+    Returns picks in the same format as get_todays_picks() for seamless integration.
+    """
+    if day is None:
+        day = date.today().isoformat()
+    
+    # Determine year from date string
+    year = day[:4]
+    
+    sports = [sport] if sport else API_TRACKED_SPORTS
+    all_picks = []
+    
+    for s in sports:
+        origin = PICKWATCH_SPORT_URLS.get(s, "https://nflpickwatch.com")
+        sport_lower = s.lower()
+        
+        # Determine season year (NBA/NHL span calendar years)
+        season_year = year
+        if s in ("NBA", "NHL"):
+            # NBA 2025-26 season → 2025
+            pass
+        
+        # Path format: /general/games/{year}/{day}/{sport}/REGULAR
+        games_path = f"/general/games/{season_year}/{day}/{sport_lower}/REGULAR"
+        games_data = _api_get(games_path, origin)
+        
+        if not games_data:
+            print(f"📭 No {s} games data for {day}")
+            continue
+        
+        # Fetch CPU premium picks
+        cpu_path = f"/general/marketplace/premium-picks/{sport_lower}/{season_year}/{day}/su/"
+        cpu_data = _api_get(cpu_path, origin)
+        
+        # Parse CPU picks into game_id → {team, confidence} format
+        cpu_picks = {}
+        if isinstance(cpu_data, dict) and cpu_data.get("experts"):
+            for expert in cpu_data["experts"]:
+                for game_id_str, pick in expert.get("picks", {}).items():
+                    if pick.get("team_id"):
+                        cpu_picks[int(game_id_str)] = {
+                            "team": pick["team_id"],
+                            "confidence": pick.get("confidence", 0),
+                        }
+        
+        # Convert games to picks
+        for game in games_data:
+            if game.get("game_state") in ("Final", "F/OT", "F"):
+                continue
+            
+            pick = _score_pick_from_api(game, cpu_picks, s)
+            if pick:
+                all_picks.append(pick)
+        
+        print(f"✅ Fetched {len(all_picks)} {s} picks via API")
+    
+    return all_picks
 
 
 def american_to_decimal(odds: int) -> float:
@@ -54,19 +306,36 @@ def decimal_to_american(decimal_odds: float) -> int:
         return int(round(-100 / (decimal_odds - 1)))
 
 
-def get_todays_picks(db_path: Optional[str] = None) -> list[dict]:
+def get_todays_picks(db_path: Optional[str] = None, use_api: bool = True) -> list[dict]:
     """
-    Fetch today's picks from Pickwatch DB.
+    Fetch today's picks. Tries HTTP API first (real-time data),
+    falls back to local SQLite DB if API is unavailable.
+    
+    Args:
+        db_path: Path to local SQLite DB (fallback)
+        use_api: If True, try Pickwatch API first. Set False for tests/offline.
     
     Returns list of pick dicts with:
     - sport, matchup, pick_team, pick_type, odds_american,
       edge, confidence_score, value_rating, recommendation
     Plus computed: odds_decimal
     """
+    # Try API first (no local file dependency)
+    if use_api:
+        try:
+            api_picks = fetch_picks_via_api()
+            if api_picks:
+                print(f"📡 Using Pickwatch API ({len(api_picks)} picks)")
+                return api_picks
+            print("📡 API returned no picks, trying local DB...")
+        except Exception as e:
+            print(f"📡 API fetch failed: {e}, falling back to local DB...")
+    
+    # Fallback to local SQLite
     path = db_path or str(PICKWATCH_DB)
     
     if not Path(path).exists():
-        print(f"⚠️  Pickwatch DB not found at {path}")
+        print(f"⚠️  Pickwatch DB not found at {path} and API unavailable")
         return []
     
     conn = sqlite3.connect(path)
@@ -93,11 +362,25 @@ def get_todays_picks(db_path: Optional[str] = None) -> list[dict]:
     return picks
 
 
-def get_unresolved_picks(db_path: Optional[str] = None) -> list[dict]:
+def get_unresolved_picks(db_path: Optional[str] = None, use_api: bool = True) -> list[dict]:
     """
     Fetch picks where outcome is still None (pending resolution).
-    These are active picks that haven't been settled yet.
+    Tries API first, falls back to local DB.
+    
+    Args:
+        db_path: Path to local SQLite DB (fallback)
+        use_api: If True, try Pickwatch API first. Set False for tests/offline.
     """
+    # API picks are always unresolved (live data)
+    if use_api:
+        try:
+            api_picks = fetch_picks_via_api()
+            if api_picks:
+                return [p for p in api_picks if p.get("outcome") is None]
+        except Exception:
+            pass
+    
+    # Fallback to local DB
     path = db_path or str(PICKWATCH_DB)
     
     if not Path(path).exists():
@@ -132,10 +415,14 @@ def get_historical_picks(
     min_edge: float = 0,
     db_path: Optional[str] = None
 ) -> list[dict]:
-    """Fetch resolved picks with outcomes for analysis."""
+    """
+    Fetch resolved picks with outcomes for analysis.
+    Historical data only available from local DB (API provides live data only).
+    """
     path = db_path or str(PICKWATCH_DB)
     
     if not Path(path).exists():
+        print(f"⚠️  Historical data requires local Pickwatch DB (not available)")
         return []
     
     conn = sqlite3.connect(path)
