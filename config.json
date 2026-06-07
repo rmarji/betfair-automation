@@ -3,6 +3,7 @@
   "max_positions": 5,
   "default_stake": 10.0,
   "max_stake_pct": 0.05,
+  "kelly_fraction": 0.25,
   "min_odds": 1.1,
   "max_odds": 10.0,
   "min_edge": 30.0,

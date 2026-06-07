@@ -117,11 +117,12 @@ def cmd_run(args):
                 skipped += 1
                 continue
             
-            # Kelly Criterion stake sizing
+            # Kelly Criterion stake sizing (1/4 fractional Kelly)
             b = sig.odds - 1  # net odds
             p = sig.confidence
             q = 1 - p
             kelly_frac = (b * p - q) / b if b > 0 else 0
+            kelly_frac *= cfg.kelly_fraction  # Apply fractional Kelly
             kelly_frac = max(0, min(kelly_frac, cfg.max_stake_pct))
             stake = round(balance * kelly_frac, 2)
             

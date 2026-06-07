@@ -25,6 +25,7 @@ DEFAULTS = {
     "max_positions": 5,              # Max concurrent positions
     "default_stake": 10.00,          # £10 per bet
     "max_stake_pct": 0.05,           # Max 5% of balance per bet
+    "kelly_fraction": 0.25,          # 1/4 Kelly (backtested: safer than full Kelly)
     
     # Odds Filters
     "min_odds": 1.10,                # Minimum acceptable odds
@@ -153,6 +154,10 @@ class Config:
         return self._data["max_stake_pct"]
     
     @property
+    def kelly_fraction(self) -> float:
+        return self._data.get("kelly_fraction", 0.25)
+    
+    @property
     def min_odds(self) -> float:
         return self._data["min_odds"]
     
@@ -212,6 +217,7 @@ def format_config_display(cfg: Config) -> str:
         f"  Max Positions:   {cfg.max_positions}",
         f"  Default Stake:   £{cfg.default_stake:.2f}",
         f"  Max Stake %:     {cfg.max_stake_pct * 100:.1f}%",
+        f"  Kelly Fraction:  {cfg.kelly_fraction:.0%} ({'1/4' if cfg.kelly_fraction == 0.25 else f'{cfg.kelly_fraction:.2f}'})",
         "",
         "**Odds Filters**",
         f"  Min Odds: {cfg.min_odds:.2f}",

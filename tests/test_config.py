@@ -90,6 +90,11 @@ class TestConfigDefaults(unittest.TestCase):
         """Test auto settle is enabled by default."""
         cfg = config_module.Config()
         self.assertTrue(cfg.auto_settle_enabled)
+    
+    def test_default_kelly_fraction(self):
+        """Test default Kelly fraction is 0.25 (1/4 Kelly)."""
+        cfg = config_module.Config()
+        self.assertEqual(cfg.kelly_fraction, 0.25)
 
 
 class TestConfigFileIO(unittest.TestCase):

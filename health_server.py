@@ -70,7 +70,8 @@ class TradingAPIHandler(BaseHTTPRequestHandler):
                     "balance": balance,
                     "initial_balance": Config().initial_balance,
                     "positions_count": len(open_pos),
-                    "realized_pnl": realized
+                    "realized_pnl": realized,
+                    "kelly_fraction": Config().kelly_fraction,
                 }
                 return self._send_json(data)
             finally:
@@ -242,11 +243,13 @@ def _run_live_cycle(conn, cfg, now):
                 print(f"[{now}] ⛔ Max positions ({cfg.max_positions}) reached, skipping remaining signals")
                 break
 
-            # Kelly stake: f* = (b*p - q) / b where b=odds-1, p=confidence, q=1-p
+            # Kelly stake: f* = (b*p - q) / b * kelly_fraction
+            # Uses fractional Kelly (1/4 Kelly) per backtesting results
             b = sig.odds - 1  # net odds
             p = sig.confidence
             q = 1 - p
             kelly_frac = (b * p - q) / b if b > 0 else 0
+            kelly_frac *= cfg.kelly_fraction  # Apply fractional Kelly (0.25 = 1/4)
             kelly_frac = max(0, min(kelly_frac, cfg.max_stake_pct))  # Cap at max_stake_pct
             stake = round(balance * kelly_frac, 2)
 
@@ -320,11 +323,12 @@ def trading_scheduler():
                         if sig.market_id in existing_markets:
                             continue  # Skip duplicate markets
                         
-                        # Kelly stake sizing
+                        # Kelly stake sizing (1/4 fractional Kelly)
                         b = sig.odds - 1
                         p = sig.confidence
                         q = 1 - p
                         kelly_frac = (b * p - q) / b if b > 0 else 0
+                        kelly_frac *= cfg.kelly_fraction  # Apply fractional Kelly
                         kelly_frac = max(0, min(kelly_frac, cfg.max_stake_pct))
                         stake = round(balance * kelly_frac, 2)
                         if stake < 1.0:
