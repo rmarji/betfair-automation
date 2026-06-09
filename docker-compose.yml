@@ -59,10 +59,6 @@ services:
         labels: "service"
         compress: "true"
 
-    # Network configuration
-    networks:
-      - betfair-net
-
     # Security options
     security_opt:
       - no-new-privileges:true
@@ -74,8 +70,3 @@ services:
 
     # Command: run trading cycle by default
     command: ["python3", "betfair_cli.py", "run"]
-
-networks:
-  betfair-net:
-    driver: bridge
-    name: betfair-automation-network
