@@ -68,5 +68,13 @@ services:
     # tmpfs:
     #   - /tmp:size=16m
 
+    # Connect to Coolify's Traefik network for routing
+    networks:
+      - coolify
+
     # Command: run trading cycle by default
     command: ["python3", "betfair_cli.py", "run"]
+
+networks:
+  coolify:
+    external: true
